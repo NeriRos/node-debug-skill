@@ -4,31 +4,31 @@
 
 ### Methods
 
-| Method | Params | Purpose |
-|--------|--------|---------|
-| `Debugger.enable` | — | Activate debugger; triggers `scriptParsed` for all loaded scripts |
-| `Debugger.disable` | — | Deactivate debugger |
-| `Debugger.setBreakpoint` | `{ location: { scriptId, lineNumber, columnNumber } }` | Set BP by exact location — **use for webpack bundles** |
-| `Debugger.setBreakpointByUrl` | `{ urlRegex, lineNumber, columnNumber }` | Set BP by URL pattern — **use for non-webpack (ts-node, tsx)** |
-| `Debugger.removeBreakpoint` | `{ breakpointId }` | Remove a breakpoint |
-| `Debugger.resume` | — | Continue execution |
-| `Debugger.stepOver` | — | Step to next line (skip function internals) |
-| `Debugger.stepInto` | — | Step into function call |
-| `Debugger.stepOut` | — | Run until current function returns |
-| `Debugger.pause` | — | Force-pause execution immediately |
-| `Debugger.evaluateOnCallFrame` | `{ callFrameId, expression, returnByValue }` | Eval expression in paused frame context |
-| `Debugger.getScriptSource` | `{ scriptId }` | Get full source text of a loaded script |
-| `Debugger.searchInContent` | `{ scriptId, query }` | Search within a script's source |
-| `Debugger.setPauseOnExceptions` | `{ state: "none" \| "uncaught" \| "all" }` | Pause on exceptions |
-| `Debugger.setAsyncCallStackDepth` | `{ maxDepth }` | Set async stack trace depth |
+| Method                            | Params                                                 | Purpose                                                                         |
+| --------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| `Debugger.enable`                 | —                                                      | Activate debugger; triggers `scriptParsed` for all loaded scripts               |
+| `Debugger.disable`                | —                                                      | Deactivate debugger                                                             |
+| `Debugger.setBreakpoint`          | `{ location: { scriptId, lineNumber, columnNumber } }` | Set BP by exact location — **use for webpack bundles**                          |
+| `Debugger.setBreakpointByUrl`     | `{ urlRegex, lineNumber, columnNumber }`               | Set BP by URL pattern — **use for non-webpack (ts-node, tsx)**                  |
+| `Debugger.removeBreakpoint`       | `{ breakpointId }`                                     | Remove a breakpoint                                                             |
+| `Debugger.resume`                 | —                                                      | Continue execution                                                              |
+| `Debugger.stepOver`               | —                                                      | Step to next line (skip function internals)                                     |
+| `Debugger.stepInto`               | —                                                      | Step into function call                                                         |
+| `Debugger.stepOut`                | —                                                      | Run until current function returns                                              |
+| `Debugger.pause`                  | —                                                      | Force-pause execution immediately                                               |
+| `Debugger.evaluateOnCallFrame`    | `{ callFrameId, expression, returnByValue }`           | Eval expression in paused frame context                                         |
+| `Debugger.getScriptSource`        | `{ scriptId }`                                         | Get full source text of a loaded script                                         |
+| `Debugger.searchInContent`        | `{ scriptId, query, caseSensitive }`                   | **Primary search method** — server-side search without transferring full source |
+| `Debugger.setPauseOnExceptions`   | `{ state: "none" \| "uncaught" \| "all" }`             | Pause on exceptions                                                             |
+| `Debugger.setAsyncCallStackDepth` | `{ maxDepth }`                                         | Set async stack trace depth                                                     |
 
 ### Events
 
-| Event | Payload | When |
-|-------|---------|------|
+| Event                   | Payload                                               | When                      |
+| ----------------------- | ----------------------------------------------------- | ------------------------- |
 | `Debugger.scriptParsed` | `{ scriptId, url, sourceMapURL, startLine, endLine }` | A script was loaded by V8 |
-| `Debugger.paused` | `{ callFrames, reason, hitBreakpoints }` | Execution paused |
-| `Debugger.resumed` | — | Execution resumed |
+| `Debugger.paused`       | `{ callFrames, reason, hitBreakpoints }`              | Execution paused          |
+| `Debugger.resumed`      | —                                                     | Execution resumed         |
 
 ### Call Frame Structure (in `Debugger.paused`)
 
@@ -50,11 +50,11 @@
 
 ### Methods
 
-| Method | Params | Purpose |
-|--------|--------|---------|
-| `Runtime.enable` | — | Enable runtime events |
+| Method                  | Params                                         | Purpose                                       |
+| ----------------------- | ---------------------------------------------- | --------------------------------------------- |
+| `Runtime.enable`        | —                                              | Enable runtime events                         |
 | `Runtime.getProperties` | `{ objectId, ownProperties, generatePreview }` | Get object properties (for inspecting locals) |
-| `Runtime.evaluate` | `{ expression, returnByValue }` | Eval in global scope (not in paused frame) |
+| `Runtime.evaluate`      | `{ expression, returnByValue }`                | Eval in global scope (not in paused frame)    |
 
 ### Using `getProperties` for Variable Inspection
 
@@ -64,7 +64,7 @@ When a frame is paused, each scope in `scopeChain` has an `objectId`. Use `Runti
 const r = await send("Runtime.getProperties", {
   objectId: scope.object.objectId,
   ownProperties: true,
-  generatePreview: true,  // gives short previews of objects
+  generatePreview: true, // gives short previews of objects
 });
 // r.result.result = [{ name: "event", value: { type: "object", preview: {...} } }, ...]
 ```
@@ -72,12 +72,19 @@ const r = await send("Runtime.getProperties", {
 ## Useful Patterns
 
 ### Pause on uncaught exceptions
+
 ```javascript
 await send("Debugger.setPauseOnExceptions", { state: "uncaught" });
 ```
 
-### Conditional breakpoint (via eval after hitting BP)
-Set a normal breakpoint, then in the pause handler check a condition and auto-resume if not met.
+### Conditional breakpoint
+
+The agent supports a `condition` field in the `searches` array. When a breakpoint hits, the condition expression is evaluated on the top frame — if falsy, execution auto-resumes:
+
+```javascript
+{ label: "Handler.handle()", search: "async handle(event)", condition: 'event?.type === "treasury.received_credit.created"' }
+```
 
 ### Watch expressions
+
 After pausing, evaluate multiple expressions and include results in the state file.

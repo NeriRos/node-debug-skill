@@ -1,12 +1,29 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const WebSocket = require(
-  require.resolve("ws", {
-    paths: [__dirname + "/../node_modules/.pnpm/ws@8.18.3/node_modules"],
-  })
-);
 
+// Auto-resolve ws: tries direct require, then searches pnpm store
+function resolveWs() {
+  const candidates = [
+    () => require.resolve("ws"),
+    () => {
+      const { execSync } = require("child_process");
+      const result = execSync(
+        'find node_modules/.pnpm -path "*/ws/lib/websocket.js" -maxdepth 5 2>/dev/null | head -1',
+        { encoding: "utf8" }
+      ).trim();
+      if (!result) throw new Error("not found");
+      return require("path").resolve(result, "../../");
+    },
+  ];
+  for (const tryResolve of candidates) {
+    try { return require(tryResolve()); } catch {}
+  }
+  throw new Error("Could not find 'ws' package. Run: find node_modules -name ws -type d -maxdepth 5");
+}
+const WebSocket = resolveWs();
+
+const MAX_FRAMES = 8;
 const STATE_FILE = path.join(__dirname, "debugger-state.json");
 const CMD_FILE = path.join(__dirname, "debugger-cmd");
 try { fs.unlinkSync(STATE_FILE); } catch {}
@@ -36,8 +53,10 @@ function run(wsUrl) {
   const ws = new WebSocket(wsUrl);
   let msgId = 1;
   const pending = new Map();
-  const allScripts = new Map(); // scriptId -> { url, source loaded? }
+  const allScripts = new Map(); // scriptId -> { url, sourceMapURL }
   let currentCallFrames = null;
+  const breakpointIdsByLabel = new Map(); // label -> breakpointId
+  const breakpointConfigs = new Map(); // breakpointId -> { label, condition }
 
   function send(method, params = {}) {
     const id = msgId++;
@@ -47,21 +66,16 @@ function run(wsUrl) {
     });
   }
 
-  async function getScriptSource(scriptId) {
-    const r = await send("Debugger.getScriptSource", { scriptId });
-    return r.result?.scriptSource || "";
-  }
-
   async function findLineInScript(scriptId, searchText) {
-    const source = await getScriptSource(scriptId);
-    const lines = source.split("\n");
-    const matches = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].includes(searchText)) {
-        matches.push({ line: i, text: lines[i].trim().substring(0, 100) });
-      }
-    }
-    return matches;
+    const r = await send("Debugger.searchInContent", {
+      scriptId,
+      query: searchText,
+      caseSensitive: true,
+    });
+    return (r.result?.result || []).map((m) => ({
+      line: m.lineNumber,
+      text: m.lineContent.trim().substring(0, 120),
+    }));
   }
 
   async function getProperties(objectId) {
@@ -91,7 +105,7 @@ function run(wsUrl) {
     const callFrames = params.callFrames;
     currentCallFrames = callFrames;
     const frames = [];
-    for (const frame of callFrames.slice(0, 5)) {
+    for (const frame of callFrames.slice(0, MAX_FRAMES)) {
       const f = { functionName: frame.functionName || "(anonymous)", url: frame.url?.split("/").pop() || frame.url, line: frame.location.lineNumber + 1 };
       for (const scope of frame.scopeChain) {
         if (scope.type === "local" && scope.object?.objectId) f.locals = await getProperties(scope.object.objectId);
@@ -127,6 +141,23 @@ function run(wsUrl) {
           writeState(state);
         }
       }
+      else if (cmd.startsWith("disable:")) {
+        const label = cmd.slice(8);
+        const bpId = breakpointIdsByLabel.get(label);
+        if (bpId) {
+          await send("Debugger.removeBreakpoint", { breakpointId: bpId });
+          breakpointIdsByLabel.delete(label);
+          breakpointConfigs.delete(bpId);
+          console.log(`>>> DISABLED: ${label}`);
+          state.disabledBreakpoints = (state.disabledBreakpoints || []).concat(label);
+          writeState(state);
+        } else {
+          console.log(`>>> DISABLE MISS: ${label} not found`);
+        }
+      }
+      else if (cmd.startsWith("enable:")) {
+        console.log(`>>> ENABLE not supported mid-session — breakpoints must be re-set by restarting the agent`);
+      }
     }, 300);
   }
 
@@ -137,6 +168,20 @@ function run(wsUrl) {
       allScripts.set(msg.params.scriptId, { url: msg.params.url, sourceMapURL: msg.params.sourceMapURL });
     }
     if (msg.method === "Debugger.paused") {
+      // Check conditional breakpoints — auto-resume if condition not met
+      const hitBpId = msg.params.hitBreakpoints?.[0];
+      const bpConfig = hitBpId ? breakpointConfigs.get(hitBpId) : null;
+      if (bpConfig?.condition) {
+        const topId = msg.params.callFrames[0]?.callFrameId;
+        if (topId) {
+          const condResult = await evaluateOnFrame(topId, bpConfig.condition);
+          if (!condResult) {
+            await send("Debugger.resume");
+            return; // skip this hit
+          }
+        }
+      }
+
       console.log("\n=== PAUSED ===");
       console.log("Top:", msg.params.callFrames[0]?.functionName, "line", msg.params.callFrames[0]?.location.lineNumber + 1);
       const state = await buildPausedState(msg.params);
@@ -199,8 +244,13 @@ function run(wsUrl) {
         const r = await send("Debugger.setBreakpoint", {
           location: { scriptId: mainScriptId, lineNumber: match.line, columnNumber: 0 },
         });
+        const bpId = r.result?.breakpointId;
         const bp = r.result?.actualLocation;
         console.log(`  BP: ${s.label} -> line ${match.line + 1} "${match.text}" -> ${bp ? "SET at line " + (bp.lineNumber + 1) : "FAIL"}`);
+        if (bpId) {
+          breakpointIdsByLabel.set(s.label, bpId);
+          if (s.condition) breakpointConfigs.set(bpId, { label: s.label, condition: s.condition });
+        }
         breakpointsSet.push({ label: s.label, line: match.line + 1, text: match.text });
       } else {
         console.log(`  MISS: ${s.label} - "${s.search}" not found in bundle`);
@@ -211,8 +261,13 @@ function run(wsUrl) {
     console.log("\nReady. Waiting for breakpoint hits...");
   });
 
-  ws.on("close", () => { writeState({ status: "disconnected" }); process.exit(0); });
-  ws.on("error", e => { console.error("WS error:", e.message); writeState({ status: "error", error: e.message }); process.exit(1); });
-  process.on("SIGTERM", () => send("Debugger.disable").then(() => ws.close()));
-  process.on("SIGINT", () => send("Debugger.disable").then(() => ws.close()));
+  ws.on("close", () => {
+    console.log("Disconnected. Reconnecting in 3s...");
+    writeState({ status: "reconnecting" });
+    pending.clear();
+    setTimeout(() => waitForInspector((newWsUrl) => run(newWsUrl)), 3000);
+  });
+  ws.on("error", e => { console.error("WS error:", e.message); writeState({ status: "error", error: e.message }); });
+  process.on("SIGTERM", () => send("Debugger.disable").then(() => ws.close()).then(() => process.exit(0)));
+  process.on("SIGINT", () => send("Debugger.disable").then(() => ws.close()).then(() => process.exit(0)));
 }

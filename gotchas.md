@@ -5,15 +5,18 @@
 Node.js `--inspect` allows only ONE active debugger WebSocket connection.
 
 **Symptoms:**
+
 - `ECONNREFUSED` when trying to connect, even though `lsof` shows the port in use
 - `lsof -i:9229` shows `ESTABLISHED` but no `LISTEN`
 
 **What happens:**
+
 1. Chrome DevTools or `chrome://inspect` auto-connects to the inspector
 2. Node.js closes the LISTEN socket (no more new connections accepted)
 3. Your CDP agent gets connection refused
 
 **Fix:**
+
 - Start the CDP agent BEFORE Chrome. The agent's polling loop handles the race.
 - If Chrome already grabbed it: restart the server, close `chrome://inspect` tabs
 - Killing the Chrome helper process that holds the connection also works but may crash Chrome
@@ -22,25 +25,14 @@ Node.js `--inspect` allows only ONE active debugger WebSocket connection.
 
 pnpm uses strict symlink isolation. Scripts outside `node_modules` can't `import "ws"` or `require("ws")`.
 
-**Fix:** Use explicit path resolution:
-```javascript
-const WebSocket = require(
-  require.resolve("ws", {
-    paths: [__dirname + "/../node_modules/.pnpm/ws@8.18.3/node_modules"],
-  })
-);
-```
+**Fix:** The agent now auto-resolves `ws` with a fallback chain: direct `require.resolve("ws")` first, then searching the pnpm store via `find`. No manual path configuration needed.
 
-Find the right path:
-```bash
-find node_modules -name "ws" -type d -maxdepth 5
-```
-
-Use the latest version. Use `.cjs` extension (not `.mjs`) to avoid ESM resolution issues.
+If auto-resolution fails, the error message tells you exactly what to run. Use `.cjs` extension (not `.mjs`) to avoid ESM resolution issues.
 
 ## 3. Chrome DevTools MCP Cannot Debug Node.js
 
 The `mcp__plugin_chrome-devtools-mcp_*` tools only operate on browser pages:
+
 - `list_pages` only returns browser tabs
 - `evaluate_script` runs in the browser page context, not Node.js
 - `navigate_page` to `chrome://inspect` can see the target but can't interact with the DevTools window it opens
@@ -51,6 +43,7 @@ The `mcp__plugin_chrome-devtools-mcp_*` tools only operate on browser pages:
 ## 4. `debugger` Statements in Source Code
 
 Adding `debugger;` to source files works when a debugger is attached, but:
+
 - Requires rebuilding (webpack watch mode may or may not pick up lib changes)
 - Clutters source code
 - Must be removed before committing

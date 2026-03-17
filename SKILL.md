@@ -17,6 +17,7 @@ Debug running Node.js processes headlessly using CDP over WebSocket. No GUI need
 A background Node.js agent connects to the `--inspect` port (9229), sets breakpoints, captures scope/variables on pause, and accepts commands via file-based IPC.
 
 See these reference files for details:
+
 - `architecture.md` — How the agent works, file-based IPC protocol
 - `webpack-breakpoints.md` — Setting breakpoints in webpack-bundled code (critical gotcha)
 - `gotchas.md` — Connection exclusivity, pnpm ws resolution, Chrome DevTools MCP limits
@@ -66,6 +67,7 @@ echo "stepOver"  > .context/debugger-cmd   # next line
 echo "stepInto"  > .context/debugger-cmd   # into function
 echo "stepOut"   > .context/debugger-cmd   # out of function
 echo "eval:JSON.stringify(myVar)" > .context/debugger-cmd  # evaluate
+echo "disable:Handler.handle()" > .context/debugger-cmd   # remove a noisy breakpoint
 ```
 
 ### 7. Read result
@@ -98,11 +100,8 @@ Copy the script you need to `.context/` and run it:
 
 ```bash
 cp ~/.claude/skills/node-debug/scripts/cdp-webpack-debugger.cjs .context/cdp-agent.cjs
-# Edit the `searches` array and `ws` path, then:
+# Edit the `searches` array, then:
 node .context/cdp-agent.cjs > .context/debugger.log 2>&1 &
 ```
 
-**Important:** Update the `ws` require path in each script to match your project's pnpm store:
-```bash
-find node_modules -name "ws" -type d -maxdepth 5
-```
+The `ws` package is auto-resolved (direct require, then pnpm store search). No manual path configuration needed.
